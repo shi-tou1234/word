@@ -54,5 +54,3 @@ exit
 如果你有任何改进建议或发现了 Bug，欢迎提交 Issue 或 Pull Request！
 
 ---
-
-制作人：**cmchen**
