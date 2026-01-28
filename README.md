@@ -42,7 +42,6 @@ git clone https://github.com/shi-tou1234/word.git
 - `词库管理.css`: 样式文件，包含毛玻璃特效与响应式布局。
 - `server.zip`: Node.js 服务端源代码及配置文件。
 - `启动单词助手.cmd`: Windows 一键启动脚本。
-- `introduction.txt`: 项目简要介绍。
 
 ## 🛠️ 技术栈
 - **前端**：HTML5, JavaScript (ES6+), [Tailwind CSS](https://tailwindcss.com/)
