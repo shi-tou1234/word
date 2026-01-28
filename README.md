@@ -27,14 +27,23 @@
    ```bash
    git clone https://github.com/shi-tou1234/word.git
    ```
+
 2. **运行项目**：
-   - 直接双击打开 `单词记录.html` 即可开始使用。（非常简陋的翻译，且没有例句)
-   - 建议在本地部署 `server.zip` 中的服务端程序以获得完整翻译和同步体验。需要启动server,需要在电脑上安装nodejs且配置好环境，具体教程可以自行查询，配置完成后在cmd输入以下命令：
-cd /d "%~dp0server"
-start node index.js
-cd /d "%~dp0"
-start 单词记录.html
-exit
+   - **方式一（简易模式）**：直接双击打开 `词库管理.html` 即可开始使用。（注：纯静态模式下翻译功能可能受限，且无服务端同步功能）
+   - **方式二（完整体验）**：建议在本地部署 `server.zip` 中的服务端程序以获得完整翻译和同步体验。
+     
+     **服务端启动步骤** (需安装 Node.js)：
+     1. 解压 `server.zip`
+     2. 运行 `启动单词助手.cmd` 或手动执行以下命令：
+
+   ```batch
+   cd /d "%~dp0server"
+   start node index.js
+   cd /d "%~dp0"
+   start 词库管理.html
+   exit
+   ```
+
 ## 🛠️ 技术栈
 
 - **前端**：HTML5, JavaScript (ES6+), [Tailwind CSS](https://tailwindcss.com/)
