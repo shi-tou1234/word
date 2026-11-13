@@ -396,6 +396,13 @@
         let authMode = 'login';
         let reviewSettings = { dailyTarget: 20, lastReviewDate: '' };
         let isReviewMode = false;
+        // 查词请求的取消控制：连续查词时取消上一个未完成的本地请求
+        let translationAbortController = null;
+        // 查词请求序号：旧请求在任何阶段（含读取响应体、备用词典）都不得写回界面
+        let translationRequestSeq = 0;
+        // 词库索引保护锁：损坏原值备份失败时置位，禁止任何写入覆盖唯一可恢复的原值
+        let librariesIndexLocked = false;
+        const LOCAL_TRANSLATE_TIMEOUT_MS = 4000; // 本地后端查词有界超时（毫秒），超时后继续走备用词典
         // Search & Sort State
         let searchQuery = '';
         let sortOrder = 'date_desc'; // date_desc, date_asc, alpha_asc, alpha_desc
@@ -511,16 +518,60 @@
         function loadLibrariesForCurrentUser() {
             const key = getLibrariesStorageKey();
             const stored = localStorage.getItem(key);
-            libraries = stored ? JSON.parse(stored) : [];
-            
+            let loaded = false;
+            try {
+                const parsed = stored ? JSON.parse(stored) : [];
+                // 结构校验：词库列表须为数组，且每项为带 id 的对象（与默认词库结构一致）
+                if (Array.isArray(parsed) && parsed.every(l => l && typeof l === 'object' && l.id != null)) {
+                    libraries = parsed;
+                    loaded = true;
+                }
+            } catch (e) {
+                // 解析失败（如损坏 JSON）时落入下方损坏处理，避免直接抛 SyntaxError
+            }
+
+            // 备份失败时置为 true：主键里仍是唯一可恢复的原值，本次运行禁止写回主键
+            let primaryPreserved = false;
+
+            if (!loaded) {
+                libraries = [];
+                if (stored) {
+                    // 保留损坏前的原值到备份键，便于后续恢复/导入，不静默清空或覆盖
+                    const backupKey = key + '_corrupt_backup';
+                    let backupOk = false;
+                    try {
+                        localStorage.setItem(backupKey, stored);
+                        backupOk = true;
+                    } catch (e) {
+                        console.error('词库数据备份失败:', e);
+                    }
+                    if (backupOk) {
+                        // 给用户可读的修复/导入提示（单词数据仍保存在各自词库键中，不会被删除）
+                        alert('检测到词库列表数据损坏，原始内容已备份到「' + backupKey + '」（未清空、未覆盖）。\n'
+                            + '当前将使用默认词库继续运行，你的单词数据仍保存在本地，不会丢失。\n'
+                            + '可通过页面「导入」功能用 Word 词库重建词库，或按上述备份键手动找回原列表。');
+                    } else {
+                        // 备份写不进去（如超出存储配额）：主键里的原值就是唯一副本，绝不能覆盖
+                        primaryPreserved = true;
+                        alert('检测到词库列表数据损坏，但原始内容备份失败（可能已超出浏览器存储配额）。\n'
+                            + '为避免覆盖唯一可恢复的原数据，本次不会写入词库列表，「' + key + '」中的原始内容已原样保留。\n'
+                            + '当前仅在内存中使用默认词库视图，你的单词数据仍保存在本地，不会丢失。\n'
+                            + '请先清理本地存储或导出数据，再刷新页面；也可按上述键手动找回原列表。');
+                    }
+                }
+            }
+
+            // 备份失败时：整个会话锁定主键，避免后续 saveLibraries 把默认索引写回、覆盖唯一可恢复的原值
+            librariesIndexLocked = primaryPreserved;
+
             const currentIdKey = getCurrentLibraryIdStorageKey();
             currentLibraryId = localStorage.getItem(currentIdKey) || 'default';
 
             // Migration / Init
             if (libraries.length === 0) {
-                // Create default library
                 libraries.push({ id: 'default', name: '默认词库', description: '我的主单词本', count: 0, created: Date.now() });
-                saveLibraries();
+                // 备份失败时只用内存视图，绝不把默认索引写回主键（会覆盖唯一可恢复的原值）
+                if (!primaryPreserved) saveLibraries();
                 
                 // Migrate old data if exists
                 const userId = (currentUser && currentUser.id) ? currentUser.id : 'guest';
@@ -528,7 +579,7 @@
                 const newKey = `danci_words_${userId}_default`;
                 
                 const oldData = localStorage.getItem(oldKey);
-                if (oldData && !localStorage.getItem(newKey)) {
+                if (!primaryPreserved && oldData && !localStorage.getItem(newKey)) {
                     localStorage.setItem(newKey, oldData);
                 }
             }
@@ -536,15 +587,21 @@
             // Ensure current library exists
             if (!libraries.find(l => l.id === currentLibraryId)) {
                 currentLibraryId = libraries[0].id;
-                localStorage.setItem(currentIdKey, currentLibraryId);
+                if (!primaryPreserved) localStorage.setItem(currentIdKey, currentLibraryId);
             }
 
             refreshLibraryCounts();
-            localStorage.setItem(key, JSON.stringify(libraries));
+            if (!primaryPreserved) localStorage.setItem(key, JSON.stringify(libraries));
         }
 
         function saveLibraries() {
             const key = getLibrariesStorageKey();
+            // 索引处于保护状态（损坏原值尚未成功备份）时，任何写入都会覆盖唯一可恢复的副本
+            if (typeof librariesIndexLocked !== 'undefined' && librariesIndexLocked) {
+                console.warn('词库索引处于保护状态（原数据备份失败），本次修改未写入本地存储');
+                renderLibraryList();
+                return;
+            }
             localStorage.setItem(key, JSON.stringify(libraries));
             renderLibraryList();
         }
@@ -564,6 +621,7 @@
         }
 
         function createNewLibrary() {
+            if (librariesIndexLocked) return alert('词库索引处于保护状态，请先备份原始数据并刷新页面，再创建词库。');
             const nameInput = document.getElementById('new-lib-name');
             const name = nameInput.value.trim();
             if (!name) return alert('请输入词库名称');
@@ -586,6 +644,7 @@
         }
         
         function deleteLibrary(id) {
+            if (librariesIndexLocked) return alert('词库索引处于保护状态，请先备份原始数据并刷新页面，再删除词库。');
             if (libraries.length <= 1) return alert('至少保留一个词库');
             if (!confirm('确定要删除这个词库吗？删除后单词将无法恢复。')) return;
             
@@ -1572,15 +1631,38 @@
         async function fetchTranslation() {
             const en = document.getElementById('new-en').value.trim();
             const zhInput = document.getElementById('new-zh');
+            // 请求序号：本次查词是否为「最新请求」的凭证，过期请求在任何阶段都静默丢弃
+            if (typeof translationRequestSeq !== 'number') translationRequestSeq = 0;
+            const seq = ++translationRequestSeq;
+            const isStale = () => seq !== translationRequestSeq
+                || document.getElementById('new-en').value.trim() !== en;
+
+            // 连续查词：取消上一个尚未结束的请求（含其响应体读取与备用词典），避免过期结果覆盖当前单词
+            if (translationAbortController) {
+                translationAbortController.abort();
+                translationAbortController = null;
+            }
+
+            // 清空输入也必须使正在读取响应体的旧查询失效。
             if (!en) return;
-            
+            tempWordData = null;
             zhInput.placeholder = '正在深度检索权威词库...';
+            let timedOut = false;
+            // controller 与定时器覆盖「fetch 拿到响应头 + 读取响应体」全程，整条链结束才清理
+            const controller = new AbortController();
+            translationAbortController = controller;
+            const timer = setTimeout(() => { timedOut = true; controller.abort(); }, LOCAL_TRANSLATE_TIMEOUT_MS);
             try {
-                // 优先尝试本地增强后端
-                const response = await fetch(`http://localhost:3000/api/translate?word=${encodeURIComponent(en)}`);
+                // 优先尝试本地增强后端（设置有界超时，上游无响应时及时降级到备用词典）
+                const response = await fetch(`http://localhost:3000/api/translate?word=${encodeURIComponent(en)}`, {
+                    signal: controller.signal
+                });
                 if (response.ok) {
+                    // 响应体读取同样受 controller.signal 约束：超时/新请求会 abort 并抛 AbortError
                     const data = await response.json();
-                    
+                    // 旧请求即使响应体晚到，也不得写回界面
+                    if (isStale()) return;
+
                     // 存储结构化数据供保存使用
                     tempWordData = {
                         definitions: data.definitions || [],
@@ -1638,16 +1720,34 @@
                 
                 throw new Error('Local backend returned empty or error');
             } catch (localError) {
-                console.log('本地后端连接失败，切换至备用源:', localError);
-                // 降级策略：使用原有 API
+                // 已被更新的查词取代：不再降级、不改动输入框
+                if (isStale()) return;
+                // 若本次请求是被更新的查词取消（非超时），交由新请求接管
+                if (localError && localError.name === 'AbortError' && !timedOut) {
+                    return;
+                }
+                clearTimeout(timer);
+                controller.abort();
+                console.log('本地后端连接失败或超时，切换至备用源:', localError);
+                // 降级策略：使用原有 API（本地链路超时后其 signal 已 abort，故用独立 controller + 独立超时）
+                const fallbackTimeoutMs = 8000;
+                const fallbackController = new AbortController();
+                translationAbortController = fallbackController;
+                const fallbackTimer = setTimeout(() => fallbackController.abort(), fallbackTimeoutMs);
                 try {
                     const [dictRes, transRes] = await Promise.all([
-                        fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(en)}`),
-                        fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(en)}&langpair=en|zh-CN`)
+                        fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(en)}`, {
+                            signal: fallbackController.signal
+                        }),
+                        fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(en)}&langpair=en|zh-CN`, {
+                            signal: fallbackController.signal
+                        })
                     ]);
                     
                     const dictData = await dictRes.json();
                     const transData = await transRes.json();
+                    // 备用链路同样可能晚于新请求返回，写回前统一校验
+                    if (isStale()) return;
                     
                     let results = [];
                     let phonetic = '';
@@ -1693,8 +1793,22 @@
                     zhInput.style.height = 'auto';
                     zhInput.style.height = (zhInput.scrollHeight) + 'px';
                 } catch (error) {
+                    if (isStale()) return;
                     console.error('所有源查询失败:', error);
                     zhInput.placeholder = '查询失败，请手动输入详细释义';
+                } finally {
+                    clearTimeout(fallbackTimer);
+                    fallbackController.abort();
+                    if (seq === translationRequestSeq && translationAbortController === fallbackController) {
+                        translationAbortController = null;
+                    }
+                }
+            } finally {
+                // 定时器与 controller 只在整条链结束（含响应体读取、备用词典）后清理，不在 fetch 返回时提前解除
+                clearTimeout(timer);
+                controller.abort();
+                if (seq === translationRequestSeq && translationAbortController === controller) {
+                    translationAbortController = null;
                 }
             }
         }

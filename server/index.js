@@ -89,11 +89,23 @@ app.get('/api/translate', async (req, res) => {
 
     try {
         const url = `https://cn.bing.com/dict/search?q=${encodeURIComponent(word)}`;
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-        });
+        // 有界超时：限制连接建立与整体耗时，避免 Bing 上游长时间无响应时请求一直挂起
+        // axios 的 timeout 覆盖「连接 + 读取」全过程，signal 作为兜底取消
+        const TRANSLATE_TIMEOUT_MS = 8000;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TRANSLATE_TIMEOUT_MS);
+        let response;
+        try {
+            response = await axios.get(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                },
+                timeout: TRANSLATE_TIMEOUT_MS,
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timer);
+        }
 
         const $ = cheerio.load(response.data);
         const result = {
